@@ -323,4 +323,34 @@ func printAverages(results []Result) {
 			algo, avgEnc, avgEnc*1e9, avgDec, avgDec*1e9)
 	}
 	fmt.Println("=====================================================")
+
+	// Write averages to CSV
+	writeAveragesCSV("averages.csv", sumEnc, sumDec, count)
+}
+
+func writeAveragesCSV(filename string, sumEnc, sumDec map[string]float64, count map[string]int) {
+	f, err := os.Create(filename)
+	if err != nil {
+		fmt.Println("Error creating averages CSV:", err)
+		return
+	}
+	defer f.Close()
+	w := csv.NewWriter(f)
+	defer w.Flush()
+
+	w.Write([]string{"Algorithm", "AvgEncPerByte(s)", "AvgDecPerByte(s)", "AvgEncPerByte(ns)", "AvgDecPerByte(ns)", "SampleCount"})
+
+	for algo := range sumEnc {
+		avgEnc := sumEnc[algo] / float64(count[algo])
+		avgDec := sumDec[algo] / float64(count[algo])
+		w.Write([]string{
+			algo,
+			fmt.Sprintf("%.9e", avgEnc),
+			fmt.Sprintf("%.9e", avgDec),
+			fmt.Sprintf("%.3f", avgEnc*1e9),
+			fmt.Sprintf("%.3f", avgDec*1e9),
+			fmt.Sprintf("%d", count[algo]),
+		})
+	}
+	fmt.Println("✅ Averages written to", filename)
 }

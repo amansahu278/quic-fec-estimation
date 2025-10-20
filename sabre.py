@@ -1,19 +1,18 @@
 # TODO: Add FEC utility function logic
 class FecController:
 
-    def __init__(self, enable = False, symbol_bits = 0):
+    def __init__(self, enable = False, symbol_size_bytes = 0):
         self.enable = bool(enable)
-        self.symbol_bits = max(0, int(symbol_bits))
+        self.symbol_size_bytes = max(0, int(symbol_size_bytes))
 
-    def get_params(self, observed_loss):
+    def get_params(self, observed_loss): # TODO: We need to add all the parameters we will observe to make a decision, Loss, QOE etc.
         if not self.enable:
             return (0, 0, 0)
-        # Placeholder policy: map observed loss to (n, r, s)
-        # You can replace this with your own logic.
+        
+        # TODO: Implement utility fn here
         n = 10
-        # Aim to cover observed loss with a small guard; r ≈ loss * (n + r) => r ≈ loss*n/(1 - loss)
         r = int(round((observed_loss / max(1e-9, 1 - observed_loss)) * n))
-        return (n, r, self.symbol_bits)
+        return (n, r, self.symbol_size_bytes)
 
 # Copyright (c) 2018, Kevin Spiteri
 # All rights reserved.
@@ -225,7 +224,7 @@ class NetworkModel:
     min_progress_size = 12000
     min_progress_time = 50
 
-    def __init__(self, network_trace, loss_rate = 0.0, fec_enabled = False, fec_n = 0, fec_repair = 0, fec_symbol_bits = 0, fec_controller = None, fec_enc_ms_per_bit = 0, fec_dec_ms_per_bit = 0):
+    def __init__(self, network_trace, loss_rate = 0.0, fec_enabled = False, fec_n = 0, fec_repair = 0, fec_symbol_size_bytes = 0, fec_controller = None, fec_enc_ms_per_byte = 0, fec_dec_ms_per_byte = 0):
         global sustainable_quality
         global network_total_time
 
@@ -240,28 +239,28 @@ class NetworkModel:
         self.fec_enabled = bool(fec_enabled)
         self.fec_n = int(fec_n) # number of source symbols per FEC block
         self.fec_repair = int(fec_repair)
-        self.fec_symbol_bits = int(fec_symbol_bits)
+        self.fec_symbol_size_bytes = int(fec_symbol_size_bytes)
         # Optional dynamic controller (takes precedence over static k/repair)
         self.fec_controller = fec_controller
         # Encode/decode delays (ms) per FEC block
-        self.fec_enc_ms_per_block = max(0, int(fec_enc_ms_per_bit))
-        self.fec_dec_ms_per_block = max(0, int(fec_dec_ms_per_bit))
+        self.fec_enc_ms_per_byte = max(0, int(fec_enc_ms_per_byte))
+        self.fec_dec_ms_per_byte = max(0, int(fec_dec_ms_per_byte))
         self.next_network_period()
 
-    def _effective_symbol_bits(self):
-        # Determine the active symbol size in bits from current FEC params
-        (_n, _r, s_bits) = self._get_active_fec_params()
-        if s_bits and s_bits > 0:
-            return s_bits
-        return self.fec_symbol_bits if (self.fec_enabled and self.fec_symbol_bits > 0) else 0
+    def _effective_symbol_size_bytes(self):
+        # Determine the active symbol size in bytes from current FEC params
+        (_n, _r, s_size_bytes) = self._get_active_fec_params()
+        if s_size_bytes and s_size_bytes > 0:
+            return s_size_bytes
+        return self.fec_symbol_size_bytes if (self.fec_enabled and self.fec_symbol_size_bytes > 0) else 0
 
     def _get_active_fec_params(self):
-        # Returns (n, r, s_bits) currently active; (0,0,0) if FEC disabled
+        # Returns (n, r, s_size_bytes) currently active; (0,0,0) if FEC disabled
         if self.fec_controller != None:
-            (n, r, s_bits) = self.fec_controller.get_params(self.loss_rate)
-            return (max(0, int(n)), max(0, int(r)), max(0, int(s_bits)))
+            (n, r, s_size_bytes) = self.fec_controller.get_params(self.loss_rate)
+            return (max(0, int(n)), max(0, int(r)), max(0, int(s_size_bytes)))
         if self.fec_enabled and self.fec_n > 0:
-            return (self.fec_n, self.fec_repair, self.fec_symbol_bits)
+            return (self.fec_n, self.fec_repair, self.fec_symbol_size_bytes)
         return (0, 0, 0)
 
     def _effective_payload_bandwidth(self, link_bandwidth):
@@ -280,12 +279,12 @@ class NetworkModel:
         return link_bandwidth * (1 - residual_loss) / overhead_factor
 
     def _fec_block_count(self, payload_bits):
-        (n, _r, s_bits) = self._get_active_fec_params()
-        if n <= 0 or s_bits <= 0 or payload_bits <= 0:
+        (n, _r, s_size_bytes) = self._get_active_fec_params()
+        if n <= 0 or s_size_bytes <= 0 or payload_bits <= 0:
             return 0
-        # ceil(payload_bits / (n * s_bits))
-        per_block_payload = n * s_bits
-        return math.ceil(payload_bits / per_block_payload)
+        # ceil(payload_bits / (n * s_size_bytes * 8))
+        per_block_payload = n * s_size_bytes * 8
+        return math.ceil(payload_bits / per_block_payload), per_block_payload
 
     def next_network_period(self):
         global manifest
@@ -451,14 +450,14 @@ class NetworkModel:
         if not check_abandon or (NetworkModel.min_progress_time <= 0 and
                                  NetworkModel.min_progress_size <= 0):
             # FEC encoding delay before request
-            blocks = self._fec_block_count(size)
-            enc_delay = blocks * self.fec_enc_ms_per_block
+            blocks, per_block_payload = self._fec_block_count(size)
+            enc_delay = blocks * self.fec_enc_ms_per_byte * per_block_payload/8 # Convert bytes to bits #TODO: Change per block payload to n+r
             if enc_delay > 0:
                 self.delay(enc_delay)
             latency = self.do_latency_delay(1)
             time = enc_delay + latency + self.do_download(size)
-            # FEC decoding delay after transfer
-            time += blocks * self.fec_dec_ms_per_block
+            # FEC decoding delay after transfer TODO: Here, we can decode with n packets, not n+r, so the decode time could be lower.
+            time += blocks * self.fec_dec_ms_per_byte * per_block_payload/8 # Convert bytes to bits # TODO: Decoding delay is only n
             return DownloadProgress(index = idx, quality = quality,
                                     size = size, downloaded = size,
                                     time = time, time_to_first_bit = latency,
@@ -467,7 +466,7 @@ class NetworkModel:
         total_download_time = 0
         total_download_size = 0
         min_time_to_progress = NetworkModel.min_progress_time
-        min_size_to_progress = max(NetworkModel.min_progress_size, self._effective_symbol_bits())
+        min_size_to_progress = max(NetworkModel.min_progress_size, self._effective_symbol_size_bytes() * 8)
 
         if NetworkModel.min_progress_size > 0:
             latency = self.do_latency_delay(1)
@@ -480,8 +479,8 @@ class NetworkModel:
 
         abandon_quality = None
         # FEC encoding delay before first symbol/bytes
-        blocks = self._fec_block_count(size)
-        enc_delay = blocks * self.fec_enc_ms_per_block
+        blocks, per_block_payload = self._fec_block_count(size)
+        enc_delay = blocks * self.fec_enc_ms_per_byte * per_block_payload/8 # Convert bytes to bits
         if enc_delay > 0:
             self.delay(enc_delay)
             total_download_time += enc_delay
@@ -517,11 +516,11 @@ class NetworkModel:
                         print('%d/%d %d(%d)' %
                               (dp.downloaded, dp.size, dp.time, dp.time_to_first_bit))
                 min_time_to_progress = NetworkModel.min_progress_time
-                min_size_to_progress = max(NetworkModel.min_progress_size, self._effective_symbol_bits())
+                min_size_to_progress = max(NetworkModel.min_progress_size, self._effective_symbol_size_bytes() * 8)
 
         # FEC decoding delay after transfer (only when not abandoned)
         if abandon_quality == None and total_download_size >= size:
-            total_download_time += blocks * self.fec_dec_ms_per_block
+            total_download_time += blocks * self.fec_dec_ms_per_byte * per_block_payload/8
         return DownloadProgress(index = idx, quality = quality,
                                 size = size, downloaded = total_download_size,
                                 time = total_download_time, time_to_first_bit = latency,
@@ -1376,10 +1375,10 @@ if __name__ == '__main__':
                         help = 'Number of repair symbols per FEC block.')
     parser.add_argument('--fec-s', metavar = 'S', type = int, default = 0,
                         help = 'Size of each source symbol in BYTES (static FEC only; auto decides its own s).')
-    parser.add_argument('--fec-enc-ms-per-block', metavar = 'MS', type = int, default = 0,
-                        help = 'FEC encoding delay per block in ms.')
-    parser.add_argument('--fec-dec-ms-per-block', metavar = 'MS', type = int, default = 0,
-                        help = 'FEC decoding delay per block in ms.')
+    parser.add_argument('--fec-enc-ms-per-byte', metavar = 'MS', type = int, default = 0,
+                        help = 'FEC encoding delay per byte in ms.')
+    parser.add_argument('--fec-dec-ms-per-byte', metavar = 'MS', type = int, default = 0,
+                        help = 'FEC decoding delay per byte in ms.')
     parser.add_argument('--fec-auto', action = 'store_true',
                         help = 'Enable dynamic FEC controller (policy implemented in code).')
     parser.add_argument('-v', '--verbose', action = 'store_true',
@@ -1454,16 +1453,16 @@ if __name__ == '__main__':
     fec_controller = None
     if args.fec_auto:
         fec_controller = FecController(enable = True,
-                                       symbol_bits = args.fec_s * 8)
+                                       symbol_size_bytes = args.fec_s)
 
     network = NetworkModel(network_trace,
                            loss_rate = args.packet_loss,
                            fec_enabled = args.fec_enable,
                            fec_n = args.fec_n,
                            fec_repair = args.fec_repair,
-                           fec_symbol_bits = args.fec_s * 8,
-                           fec_enc_ms_per_bit = args.fec_enc_ms_per_block,
-                           fec_dec_ms_per_bit = args.fec_dec_ms_per_block,
+                           fec_symbol_size_bytes = args.fec_s,
+                           fec_enc_ms_per_byte = args.fec_enc_ms_per_byte,
+                           fec_dec_ms_per_byte = args.fec_dec_ms_per_byte,
                            fec_controller = fec_controller)
 
     if args.replace[-3:] == '.py':
