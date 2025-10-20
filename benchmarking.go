@@ -13,8 +13,13 @@ import (
 	rq "github.com/xssnick/raptorq"
 )
 
-// ---------------- XOR ----------------
+//
+// ====================================================
+// Core FEC Implementations
+// ====================================================
+//
 
+// ---------- XOR ----------
 func EncodeXOR(payload []byte, symbolSize, parity int) ([][]byte, error) {
 	k := int(math.Ceil(float64(len(payload)) / float64(symbolSize)))
 	parities := make([][]byte, parity)
@@ -54,15 +59,16 @@ func DecodeXOR(dataShards [][]byte, lostIndices []int) error {
 	return nil
 }
 
-// ---------------- Reed-Solomon ----------------
-
+// ---------- Reed–Solomon ----------
 func EncodeRS(payload []byte, symbolSize, parity int) ([][]byte, error) {
 	dataShards := int(math.Ceil(float64(len(payload)) / float64(symbolSize)))
 	parityShards := parity
+
 	enc, err := rs.New(dataShards, parityShards)
 	if err != nil {
 		return nil, err
 	}
+
 	shards := make([][]byte, dataShards+parityShards)
 	for i := 0; i < dataShards; i++ {
 		start := i * symbolSize
@@ -77,20 +83,27 @@ func EncodeRS(payload []byte, symbolSize, parity int) ([][]byte, error) {
 	for i := dataShards; i < dataShards+parityShards; i++ {
 		shards[i] = make([]byte, symbolSize)
 	}
-	err = enc.Encode(shards)
-	return shards, err
+
+	if err := enc.Encode(shards); err != nil {
+		return nil, err
+	}
+	return shards, nil
 }
 
-func DecodeRS(shards [][]byte, missing int) error {
-	dataShards := len(shards) - missing
-	parityShards := missing
-	dec, err := rs.New(dataShards, parityShards)
+func DecodeRS(shards [][]byte, parity int) error {
+	total := len(shards)
+	dataShards := total - parity
+	if dataShards <= 0 {
+		return fmt.Errorf("invalid shard config: data=%d parity=%d", dataShards, parity)
+	}
+
+	dec, err := rs.New(dataShards, parity)
 	if err != nil {
 		return err
 	}
-	for i := 0; i < missing; i++ {
-		shards[i] = nil
-	}
+
+	// shards[0] = nil // simulate one missing data shard
+
 	ok, err := dec.Verify(shards)
 	if err != nil {
 		return err
@@ -101,50 +114,61 @@ func DecodeRS(shards [][]byte, missing int) error {
 	return dec.Reconstruct(shards)
 }
 
-// ---------------- RaptorQ ----------------
-
+// ---------- RaptorQ ----------
 func EncodeRaptorQ(payload []byte, symbolSize, parity int) ([][]byte, error) {
-	obj := rq.NewEncoder(payload, uint16(symbolSize))
-	totalSymbols := int(math.Ceil(float64(len(payload)) / float64(symbolSize)))
-	total := totalSymbols + parity
-	out := make([][]byte, total)
-	for i := 0; i < total; i++ {
-		sym, err := obj.Encode(uint32(i))
-		if err != nil {
-			return nil, err
-		}
-		out[i] = sym
+	r := rq.NewRaptorQ(uint32(symbolSize))
+	enc, err := r.CreateEncoder(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	K := int(enc.BaseSymbolsNum())
+	totalSymbols := K + parity
+	out := make([][]byte, totalSymbols)
+	for i := 0; i < totalSymbols; i++ {
+		out[i] = enc.GenSymbol(uint32(i))
 	}
 	return out, nil
 }
 
-func DecodeRaptorQ(encoded [][]byte, symbolSize int, totalSymbols int) error {
-	payloadSize := totalSymbols * symbolSize
-	decoder := rq.NewDecoder(uint64(payloadSize), uint16(symbolSize))
+func DecodeRaptorQ(encoded [][]byte, symbolSize int, dataSizeBytes int) error {
+	r := rq.NewRaptorQ(uint32(symbolSize))
+	dec, err := r.CreateDecoder(uint32(dataSizeBytes))
+	if err != nil {
+		return err
+	}
+
 	for i, sym := range encoded {
-		err := decoder.AddSymbol(sym, uint32(i))
+		done, err := dec.AddSymbol(uint32(i), sym)
 		if err != nil {
 			return err
 		}
-		if decoder.IsDecoded() {
+		if done {
 			break
 		}
 	}
-	_, err := decoder.Decode()
+
+	_, _, err = dec.Decode()
 	return err
 }
 
-// ---------------- Result structs ----------------
+//
+// ====================================================
+// Benchmarking Framework
+// ====================================================
+//
 
 type Result struct {
-	Algo         string
-	PayloadBytes int
-	SymbolSize   int
-	Parity       int
-	MeanEncSec   float64
-	MeanDecSec   float64
-	EncPerByte   float64
-	DecPerByte   float64
+	Algo       string
+	N          int
+	S          int
+	R          float64
+	Parity     int
+	PayloadB   int
+	EncSec     float64
+	DecSec     float64
+	EncPerByte float64
+	DecPerByte float64
 }
 
 func mean(xs []float64) float64 {
@@ -158,16 +182,21 @@ func mean(xs []float64) float64 {
 	return sum / float64(len(xs))
 }
 
-func bench(algo string, encode func([]byte, int, int) ([][]byte, error),
-	decode func([][]byte, int) error, payloadB, symbolSize, parity, iters int) Result {
+func bench(algo string,
+	encode func([]byte, int, int) ([][]byte, error),
+	decode func([][]byte, int) error,
+	N, S int, R float64, iters int) Result {
+
+	payloadB := N * S
+	parity := int(math.Ceil(float64(N) * R / 100.0))
 
 	payload := make([]byte, payloadB)
-	rand.Read(payload)
+	_, _ = rand.Read(payload)
 
 	var encTimes, decTimes []float64
 	for i := 0; i < iters; i++ {
 		start := time.Now()
-		shards, err := encode(payload, symbolSize, parity)
+		shards, err := encode(payload, S, parity)
 		if err != nil {
 			fmt.Printf("%s encode error: %v\n", algo, err)
 			return Result{}
@@ -176,8 +205,7 @@ func bench(algo string, encode func([]byte, int, int) ([][]byte, error),
 
 		if decode != nil {
 			start = time.Now()
-			err = decode(shards, 1)
-			if err != nil {
+			if err := decode(shards, parity); err != nil {
 				fmt.Printf("%s decode error: %v\n", algo, err)
 				return Result{}
 			}
@@ -190,45 +218,61 @@ func bench(algo string, encode func([]byte, int, int) ([][]byte, error),
 	tByteEnc := meanEnc / float64(payloadB)
 	tByteDec := meanDec / float64(payloadB)
 
-	fmt.Printf("%s | payload=%dB sym=%dB p=%d | Enc=%.6fs (%.3en/byte) Dec=%.6fs (%.3en/byte)\n",
-		algo, payloadB, symbolSize, parity, meanEnc, tByteEnc*1e9, meanDec, tByteDec*1e9)
+	fmt.Printf("%-12s | N=%4d S=%5d R=%4.1f%% | Enc=%.6fs (%.3f ns/B) | Dec=%.6fs (%.3f ns/B)\n",
+		algo, N, S, R, meanEnc, tByteEnc*1e9, meanDec, tByteDec*1e9)
 
-	return Result{Algo: algo, PayloadBytes: payloadB, SymbolSize: symbolSize, Parity: parity,
-		MeanEncSec: meanEnc, MeanDecSec: meanDec, EncPerByte: tByteEnc, DecPerByte: tByteDec}
+	return Result{
+		Algo:       algo,
+		N:          N,
+		S:          S,
+		R:          R,
+		Parity:     parity,
+		PayloadB:   payloadB,
+		EncSec:     meanEnc,
+		DecSec:     meanDec,
+		EncPerByte: tByteEnc,
+		DecPerByte: tByteDec,
+	}
 }
 
-// ---------------- main ----------------
+//
+// ====================================================
+// Main loop (N, S, R grid)
+// ====================================================
+//
 
 func main() {
 	runtime.GOMAXPROCS(1)
 	results := []Result{}
 
-	payloadSizes := []int{256 * 1024, 1024 * 1024}
-	symbolSizes := []int{512, 1024}
-	parities := []int{16, 64}
-	iters := 5
+	Ns := []int{10, 20, 30, 40, 50}     // number of source symbols
+	Ss := []int{64, 92, 120, 250, 512}  // bytes per symbol
+	Rs := []float64{10, 20, 30, 40, 50} // redundancy %
+	iters := 3
 
-	for _, B := range payloadSizes {
-		for _, S := range symbolSizes {
-			for _, P := range parities {
-				results = append(results,
-					bench("XOR", EncodeXOR, DecodeXOR, B, S, P, iters))
-				results = append(results,
-					bench("ReedSolomon", EncodeRS, DecodeRS, B, S, P, iters))
-				results = append(results,
-					bench("RaptorQ", EncodeRaptorQ, func(sh [][]byte, _ int) error {
-						totalSymbols := int(math.Ceil(float64(B) / float64(S)))
-						return DecodeRaptorQ(sh, S, totalSymbols)
-					}, B, S, P, iters))
+	for _, N := range Ns {
+		for _, S := range Ss {
+			for _, R := range Rs {
+				xorDecode := func(sh [][]byte, _ int) error { return DecodeXOR(sh, []int{0}) }
+				rsDecode := func(sh [][]byte, _ int) error { return DecodeRS(sh, int(math.Ceil(float64(N)*R/100.0))) }
+				rqDecode := func(sh [][]byte, _ int) error { return DecodeRaptorQ(sh, S, N*S) }
+
+				results = append(results, bench("XOR", EncodeXOR, xorDecode, N, S, R, iters))
+				results = append(results, bench("ReedSolomon", EncodeRS, rsDecode, N, S, R, iters))
+				results = append(results, bench("RaptorQ", EncodeRaptorQ, rqDecode, N, S, R, iters))
 			}
 		}
 	}
 
-	writeCSV("results.csv", results)
-	printAlgorithmAverages(results)
+	writeCSV("results_nsr.csv", results)
+	printAverages(results)
 }
 
-// ---------------- Helpers ----------------
+//
+// ====================================================
+// Helpers
+// ====================================================
+//
 
 func writeCSV(filename string, results []Result) {
 	f, err := os.Create(filename)
@@ -237,21 +281,22 @@ func writeCSV(filename string, results []Result) {
 		return
 	}
 	defer f.Close()
+	w := csv.NewWriter(f)
+	defer w.Flush()
 
-	writer := csv.NewWriter(f)
-	defer writer.Flush()
-
-	writer.Write([]string{"Algorithm", "PayloadBytes", "SymbolSize", "Parity", "MeanEncSec",
-		"MeanDecSec", "EncPerByte(s)", "DecPerByte(s)"})
+	w.Write([]string{"Algorithm", "N", "S", "R%", "Parity", "PayloadBytes",
+		"MeanEncSec", "MeanDecSec", "EncPerByte(s)", "DecPerByte(s)"})
 
 	for _, r := range results {
-		writer.Write([]string{
+		w.Write([]string{
 			r.Algo,
-			fmt.Sprintf("%d", r.PayloadBytes),
-			fmt.Sprintf("%d", r.SymbolSize),
+			fmt.Sprintf("%d", r.N),
+			fmt.Sprintf("%d", r.S),
+			fmt.Sprintf("%.1f", r.R),
 			fmt.Sprintf("%d", r.Parity),
-			fmt.Sprintf("%.9f", r.MeanEncSec),
-			fmt.Sprintf("%.9f", r.MeanDecSec),
+			fmt.Sprintf("%d", r.PayloadB),
+			fmt.Sprintf("%.9f", r.EncSec),
+			fmt.Sprintf("%.9f", r.DecSec),
 			fmt.Sprintf("%.9e", r.EncPerByte),
 			fmt.Sprintf("%.9e", r.DecPerByte),
 		})
@@ -259,23 +304,23 @@ func writeCSV(filename string, results []Result) {
 	fmt.Println("\n✅ Results written to", filename)
 }
 
-func printAlgorithmAverages(results []Result) {
-	sumsEnc := map[string]float64{}
-	sumsDec := map[string]float64{}
-	counts := map[string]int{}
+func printAverages(results []Result) {
+	sumEnc := map[string]float64{}
+	sumDec := map[string]float64{}
+	count := map[string]int{}
 
 	for _, r := range results {
-		sumsEnc[r.Algo] += r.EncPerByte
-		sumsDec[r.Algo] += r.DecPerByte
-		counts[r.Algo]++
+		sumEnc[r.Algo] += r.EncPerByte
+		sumDec[r.Algo] += r.DecPerByte
+		count[r.Algo]++
 	}
 
-	fmt.Println("\n========= Average Per-Byte Times (Aggregated) =========")
-	for algo := range sumsEnc {
-		meanEnc := sumsEnc[algo] / float64(counts[algo])
-		meanDec := sumsDec[algo] / float64(counts[algo])
-		fmt.Printf("%-12s | Enc=%.3e s/byte (%.3f ns/byte) | Dec=%.3e s/byte (%.3f ns/byte)\n",
-			algo, meanEnc, meanEnc*1e9, meanDec, meanDec*1e9)
+	fmt.Println("\n========= Average Per-Byte Encoding/Decoding =========")
+	for algo := range sumEnc {
+		avgEnc := sumEnc[algo] / float64(count[algo])
+		avgDec := sumDec[algo] / float64(count[algo])
+		fmt.Printf("%-12s | Enc=%.3e s/B (%.3f ns/B) | Dec=%.3e s/B (%.3f ns/B)\n",
+			algo, avgEnc, avgEnc*1e9, avgDec, avgDec*1e9)
 	}
-	fmt.Println("=======================================================")
+	fmt.Println("=====================================================")
 }
