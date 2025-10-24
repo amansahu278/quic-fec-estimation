@@ -1,0 +1,4 @@
+Algorithm,AvgEncPerByte(s),AvgDecPerByte(s),AvgEncPerByte(ns),AvgDecPerByte(ns),SampleCount
+XOR,6.516538418e-09,2.156625647e-10,6.517,0.216,125
+ReedSolomon,3.567287364e-08,3.486280635e-08,35.673,34.863,125
+RaptorQ,2.284117837e-08,2.266187258e-08,22.841,22.662,125
