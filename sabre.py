@@ -3,15 +3,20 @@ class FecController:
 
     def __init__(self, enable = False, symbol_size_bytes = 0):
         self.enable = bool(enable)
-        self.symbol_size_bytes = max(0, int(symbol_size_bytes))
+        self.symbol_size_bytes = max(0, symbol_size_bytes)
 
     def get_params(self, observed_loss): # TODO: We need to add all the parameters we will observe to make a decision, Loss, QOE etc.
+        buff_level = get_buffer_level()
+        print(f"---Buffer level: {buff_level}")
+
+
         if not self.enable:
             return (0, 0, 0)
         
         # TODO: Implement utility fn here
         n = 10
         r = int(round((observed_loss / max(1e-9, 1 - observed_loss)) * n))
+        r=2
         return (n, r, self.symbol_size_bytes)
 
 # Copyright (c) 2018, Kevin Spiteri
@@ -243,8 +248,8 @@ class NetworkModel:
         # Optional dynamic controller (takes precedence over static k/repair)
         self.fec_controller = fec_controller
         # Encode/decode delays (ms) per FEC block
-        self.fec_enc_ms_per_byte = max(0, int(fec_enc_ms_per_byte))
-        self.fec_dec_ms_per_byte = max(0, int(fec_dec_ms_per_byte))
+        self.fec_enc_ms_per_byte = max(0, fec_enc_ms_per_byte)
+        self.fec_dec_ms_per_byte = max(0, fec_dec_ms_per_byte)
         self.next_network_period()
 
     def _effective_symbol_size_bytes(self):
@@ -284,7 +289,7 @@ class NetworkModel:
             return 0
         # ceil(payload_bits / (n * s_size_bytes * 8))
         per_block_payload = n * s_size_bytes * 8
-        return math.ceil(payload_bits / per_block_payload), per_block_payload
+        return math.ceil(payload_bits / per_block_payload)
 
     def next_network_period(self):
         global manifest
@@ -441,6 +446,9 @@ class NetworkModel:
         network_total_time += time
 
     def download(self, size, idx, quality, buffer_level, check_abandon = None):
+
+        n, r, s_size_bytes = self._get_active_fec_params()
+
         if size <= 0:
             return DownloadProgress(index = idx, quality = quality,
                                     size = 0, downloaded = 0,
@@ -450,14 +458,14 @@ class NetworkModel:
         if not check_abandon or (NetworkModel.min_progress_time <= 0 and
                                  NetworkModel.min_progress_size <= 0):
             # FEC encoding delay before request
-            blocks, per_block_payload = self._fec_block_count(size)
-            enc_delay = blocks * self.fec_enc_ms_per_byte * per_block_payload/8 # Convert bytes to bits #TODO: Change per block payload to n+r
+            blocks = self._fec_block_count(size)
+            enc_delay = blocks * self.fec_enc_ms_per_byte * (n+r) * s_size_bytes
             if enc_delay > 0:
                 self.delay(enc_delay)
             latency = self.do_latency_delay(1)
             time = enc_delay + latency + self.do_download(size)
             # FEC decoding delay after transfer TODO: Here, we can decode with n packets, not n+r, so the decode time could be lower.
-            time += blocks * self.fec_dec_ms_per_byte * per_block_payload/8 # Convert bytes to bits # TODO: Decoding delay is only n
+            time += blocks * self.fec_dec_ms_per_byte * n * s_size_bytes # Decode only n packets
             return DownloadProgress(index = idx, quality = quality,
                                     size = size, downloaded = size,
                                     time = time, time_to_first_bit = latency,
@@ -479,8 +487,8 @@ class NetworkModel:
 
         abandon_quality = None
         # FEC encoding delay before first symbol/bytes
-        blocks, per_block_payload = self._fec_block_count(size)
-        enc_delay = blocks * self.fec_enc_ms_per_byte * per_block_payload/8 # Convert bytes to bits
+        blocks = self._fec_block_count(size)
+        enc_delay = blocks * self.fec_enc_ms_per_byte * (n+r) * s_size_bytes
         if enc_delay > 0:
             self.delay(enc_delay)
             total_download_time += enc_delay
@@ -520,7 +528,7 @@ class NetworkModel:
 
         # FEC decoding delay after transfer (only when not abandoned)
         if abandon_quality == None and total_download_size >= size:
-            total_download_time += blocks * self.fec_dec_ms_per_byte * per_block_payload/8
+            total_download_time += blocks * self.fec_dec_ms_per_byte * n * s_size_bytes
         return DownloadProgress(index = idx, quality = quality,
                                 size = size, downloaded = total_download_size,
                                 time = total_download_time, time_to_first_bit = latency,
@@ -1375,9 +1383,9 @@ if __name__ == '__main__':
                         help = 'Number of repair symbols per FEC block.')
     parser.add_argument('--fec-s', metavar = 'S', type = int, default = 0,
                         help = 'Size of each source symbol in BYTES (static FEC only; auto decides its own s).')
-    parser.add_argument('--fec-enc-ms-per-byte', metavar = 'MS', type = int, default = 0,
+    parser.add_argument('--fec-enc-ms-per-byte', metavar = 'MS', type = float, default = 0,
                         help = 'FEC encoding delay per byte in ms.')
-    parser.add_argument('--fec-dec-ms-per-byte', metavar = 'MS', type = int, default = 0,
+    parser.add_argument('--fec-dec-ms-per-byte', metavar = 'MS', type = float, default = 0,
                         help = 'FEC decoding delay per byte in ms.')
     parser.add_argument('--fec-auto', action = 'store_true',
                         help = 'Enable dynamic FEC controller (policy implemented in code).')
@@ -1552,6 +1560,7 @@ if __name__ == '__main__':
 
         #print('size %d, current_segment %d, quality %d, buffer_level %d' %
         #      (size, current_segment, quality, get_buffer_level()))
+        # TODO: Set new FEC params here.
 
         download_metric = network.download(size, current_segment, quality,
                                            get_buffer_level(), check_abandon)
