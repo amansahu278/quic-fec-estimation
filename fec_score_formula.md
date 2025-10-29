@@ -60,7 +60,18 @@ This ensures loss governs decisions when either buffer is small or headroom is t
 
 We will allow some overhead for protection, scaled by both Buffer and headroom. Thus, allowed “free” overhead:
 
-$$o_{free}(B_{eff},h) = \min(o_{cap}, o_0 + k_B B_{eff} + k_h \min(h, h_{cap}))$$
+$$o_{free}(B_{eff},h) = \min(o_{cap}, o_0 + k_B \max(0, B_{crit} - B_{eff}) + k_h \min(h, h_{cap}))$$
+
+Which becomes, allow some overhead because of buffer level (more overhead is okay if buffer level is low), and because of how much headroom we still ahve
+
+* $\max(0, B_{crit} - B_{eff})$ caps buffer influence. We allow for more overhead if the buffer is low.
+
+* $h=\frac{G−R_{play}}{max⁡(R_{play},ϵ)}$ is bandwidth headroom.
+
+* $o_{cap}$ is a hard ceiling (e.g., 0.35 = 35%).
+
+* $o_{0},k_{B},k_{h}$ are tunable slopes.
+
 
 Excess overhead and penalty:
 
@@ -125,14 +136,14 @@ $$
 | λ_h | 0.4 |  |
 | w_blk,min | 0.3 |  |
 | λ_risk | 0.6 |  |
-| λ_{h^-} | 0.6 |  |
+| $λ_{h^-}$ | 0.6 |  |
 
 ---
 
 ## H) Constraints & Tie-breaking
 
-- Reject if \(o > o_{cap}\) or \(t_{blk} > 1.5 B_{eff}\)
-- Reject if \(z < 0\) and \(B_{eff} < 1s\)
+- Reject if $(o > o_{cap})$ or $(t_{blk} > 1.5 B_{eff})$
+- Reject if $(z < 0)$ and $(B_{eff} < 1s)$
 - Tie-break order: lower o → larger S → larger N (unless buffer < B_crit)
 - Apply hysteresis: switch only if new score < old × (1−δ), with δ ∈ [0.05, 0.15]
 - Minimum dwell: one segment before re-evaluation
