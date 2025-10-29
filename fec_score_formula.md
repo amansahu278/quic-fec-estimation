@@ -6,14 +6,14 @@ At each decision step, we evaluate each candidate \((N,S,R)\) — source symbols
 
 ## A) Derived per-candidate quantities
 
-\[
+$$
 \begin{aligned}
 P &= \lceil N R \rceil \quad \text{(repair symbols)} \\
 T &= N + P \quad \text{(total symbols)} \\
 o &= \frac{P}{T} = \frac{R}{1+R} \quad \text{(overhead fraction)} \\
 B_{blk} &= T \cdot S \quad \text{(bytes per FEC block)}
 \end{aligned}
-\]
+$$
 
 ---
 
@@ -23,7 +23,7 @@ B_{blk} &= T \cdot S \quad \text{(bytes per FEC block)}
 - \(B\): buffer level (seconds)
 - \(G\): goodput / available throughput (bits/s)
 - \(R_{play}\): current playback bitrate (bits/s)
-- **Headroom:** $(h = \frac{G - R_{play}}{\max(R_{play}, \epsilon)})$
+- **Headroom:** $$(h = \frac{G - R_{play}}{\max(R_{play}, \epsilon)})$$
 
 **Buffer capping:**
 \[
@@ -34,6 +34,7 @@ $B_{eff} = \min(B, B_{sat})$
 
 ## C) Penalty 1 — Loss-robustness
 
+
 Binomial normal approximation with continuity correction:
 
 $$z = \frac{P + 0.5 - T p}{\sqrt{T p (1-p)}} \quad \text{(safety z-margin)}$$
@@ -42,16 +43,22 @@ Target safety margin increases when buffer is small and decreases with headroom:
 
 $$z_{tgt}(B_{eff},h) = z_{min} + \alpha_B \max(0, B_{crit} - B_{eff}) - \alpha_h \min(h, h_{cap})$$
 
+Note: 
+$+ \alpha_B \max(0, B_{crit} - B_{eff})$ -> Allows for more safety if buffer is low
+$- \alpha_h \min(h, h_{cap})$ -> We should be more lenient if headroom is high
+
+
 Loss penalty:
 
 $$pen_{loss} = [\max(0, z_{tgt} - z)]^{\beta}$$
 
+This ensures loss governs decisions when either buffer is small or headroom is thin—even with a large buffer.
 
 ---
 
 ## D) Penalty 2 — Overhead
 
-Allowed “free” overhead:
+We will allow some overhead for protection, scaled by both Buffer and headroom. Thus, allowed “free” overhead:
 
 $$o_{free}(B_{eff},h) = \min(o_{cap}, o_0 + k_B B_{eff} + k_h \min(h, h_{cap}))$$
 
@@ -63,11 +70,13 @@ $$o_{ex} = \max(0, o - o_{free}), \quad pen_{over} = o_{ex}^{\alpha}$$
 
 ## E) Penalty 3 — Blockization / latency
 
+Extremely large blocks can be risky when the buffer is low, because you wait longer to fill/transmit one FEC decision unit
 Approximate block transmit time:
 
 $$t_{blk} = \frac{8 T S}{\max(G, \epsilon)}$$
 
-Penalty (starts when \(t_{blk} > \eta B_{eff}\)):
+We penalize large $t_{blk}$ relative to buffer
+Penalty (starts when $(t_{blk} > \eta B_{eff})$):
 
 $$pen_{blk} = \min(1, \max(0, \frac{t_{blk}}{\eta B_{eff}} - 1))$$
 
